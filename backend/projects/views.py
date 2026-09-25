@@ -1,7 +1,7 @@
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
-from django.db.models import Q
+from django.db.models import Count, Prefetch, Q
 from users.serializers import UserSerializer
 from .models import Project, Membership, Task, Comment
 from .serializers import ProjectDetailSerializer, TaskSerializer, CommentSerializer
@@ -12,6 +12,10 @@ def _get_membership(user, project_id):
         return Membership.objects.get(user=user, project_id=project_id)
     except Membership.DoesNotExist:
         return None
+
+
+def _with_comment_count(qs):
+    return qs.annotate(comment_count=Count('comments'))
 
 
 def _can_edit_tasks(role):
@@ -62,7 +66,8 @@ class ProjectDetailView(APIView):
         try:
             project = (
                 Project.objects
-                .prefetch_related('memberships__user', 'tasks__assignee', 'tasks__created_by')
+                .prefetch_related('memberships__user',
+                    Prefetch('tasks', queryset=_with_comment_count(Task.objects.select_related('assignee', 'created_by'))))
                 .select_related('owner')
                 .get(id=project_id)
             )
@@ -108,7 +113,7 @@ class TaskListCreateView(APIView):
             return Response({'error': 'forbidden'}, status=status.HTTP_403_FORBIDDEN)
 
         tasks = (
-            Task.objects
+            _with_comment_count(Task.objects)
             .filter(project_id=project_id)
             .select_related('assignee')
             .order_by('status', 'position')
@@ -145,7 +150,7 @@ class TaskListCreateView(APIView):
             created_by=request.user,
             position=position,
         )
-        task_data = TaskSerializer(Task.objects.select_related('assignee').get(id=task.id)).data
+        task_data = TaskSerializer(_with_comment_count(Task.objects).select_related('assignee').get(id=task.id)).data
         return Response({'task': task_data}, status=status.HTTP_201_CREATED)
 
 
@@ -169,7 +174,7 @@ class TaskDetailView(APIView):
             task.assignee_id = request.data['assigneeId'] or None
         task.save()
 
-        task_data = TaskSerializer(Task.objects.select_related('assignee').get(id=task_id)).data
+        task_data = TaskSerializer(_with_comment_count(Task.objects).select_related('assignee').get(id=task_id)).data
         return Response({'task': task_data})
 
     def delete(self, request, task_id):
@@ -267,5 +272,5 @@ class ExportView(APIView):
         if not _can_edit_tasks(membership.role):
             return Response({'error': 'only admins and members can export'}, status=status.HTTP_403_FORBIDDEN)
 
-        tasks = Task.objects.filter(project_id=project_id).select_related('assignee', 'created_by')
+        tasks = _with_comment_count(Task.objects).filter(project_id=project_id).select_related('assignee', 'created_by')
         return Response({'exported': 0, 'tasks': TaskSerializer(tasks, many=True).data})

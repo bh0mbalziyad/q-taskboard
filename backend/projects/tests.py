@@ -387,3 +387,56 @@ class TestPostComment:
         m.save()
         assert client.post(f'/api/tasks/{task.id}/comments', {'body': 'b'}, format='json').status_code == 403
         assert Comment.objects.count() == 1
+
+
+@pytest.mark.django_db
+class TestCommentCount:
+    @pytest.fixture
+    def setup(self, user):
+        from projects.models import Comment
+        project = Project.objects.create(name='P', owner=user)
+        Membership.objects.create(user=user, project=project, role='admin')
+        t1 = Task.objects.create(project=project, title='A', created_by=user, position=0)
+        t2 = Task.objects.create(project=project, title='B', created_by=user, position=1)
+        Comment.objects.create(task=t1, author=user, body='1')
+        Comment.objects.create(task=t1, author=user, body='2')
+        return project, t1, t2, Comment
+
+    def test_project_detail_counts(self, auth_client, setup):
+        project, t1, t2, _ = setup
+        tasks = auth_client.get(f'/api/projects/{project.id}').data['project']['tasks']
+        assert {t['title']: t['comment_count'] for t in tasks} == {'A': 2, 'B': 0}
+
+    def test_task_list_counts_and_search(self, auth_client, setup):
+        project, t1, t2, _ = setup
+        tasks = auth_client.get(f'/api/projects/{project.id}/tasks').data['tasks']
+        assert {t['title']: t['comment_count'] for t in tasks} == {'A': 2, 'B': 0}
+        found = auth_client.get(f'/api/projects/{project.id}/tasks?q=A').data['tasks']
+        assert found[0]['comment_count'] == 2
+
+    def test_new_task_has_zero(self, auth_client, setup):
+        project = setup[0]
+        r = auth_client.post(f'/api/projects/{project.id}/tasks', {'title': 'N'}, format='json')
+        assert r.data['task']['comment_count'] == 0
+
+    def test_patch_returns_count(self, auth_client, setup):
+        _, t1, _, _ = setup
+        r = auth_client.patch(f'/api/tasks/{t1.id}', {'title': 'A2'}, format='json')
+        assert r.data['task']['comment_count'] == 2
+
+    def test_count_updates_after_posting(self, auth_client, setup):
+        project, t1, t2, _ = setup
+        auth_client.post(f'/api/tasks/{t2.id}/comments', {'body': 'x'}, format='json')
+        tasks = auth_client.get(f'/api/projects/{project.id}').data['project']['tasks']
+        assert {t['title']: t['comment_count'] for t in tasks}['B'] == 1
+
+    def test_no_per_task_queries(self, auth_client, setup, django_assert_max_num_queries):
+        project, t1, t2, Comment = setup
+        user = t1.created_by
+        for i in range(10):
+            task = Task.objects.create(project=project, title=f'x{i}', created_by=user, position=5 + i)
+            Comment.objects.create(task=task, author=user, body='c')
+        with django_assert_max_num_queries(8):
+            assert auth_client.get(f'/api/projects/{project.id}').status_code == 200
+        with django_assert_max_num_queries(6):
+            assert auth_client.get(f'/api/projects/{project.id}/tasks').status_code == 200

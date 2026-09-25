@@ -8,6 +8,8 @@ class TaskSerializer(serializers.ModelSerializer):
     assignee_id = serializers.SerializerMethodField()
     project_id = serializers.SerializerMethodField()
     created_by_id = serializers.SerializerMethodField()
+    # Requires the queryset to be annotated with comment_count (see with_comment_count).
+    comment_count = serializers.IntegerField(read_only=True)
 
     def get_assignee_id(self, obj):
         return str(obj.assignee_id) if obj.assignee_id else None
@@ -22,7 +24,7 @@ class TaskSerializer(serializers.ModelSerializer):
         model = Task
         fields = [
             'id', 'project_id', 'title', 'description', 'status',
-            'assignee_id', 'created_by_id', 'position', 'created_at', 'updated_at', 'assignee',
+            'assignee_id', 'created_by_id', 'position', 'created_at', 'updated_at', 'assignee', 'comment_count',
         ]
 
 

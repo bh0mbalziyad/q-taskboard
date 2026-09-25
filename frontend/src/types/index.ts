@@ -19,6 +19,7 @@ export type ApiTask = {
   createdAt: string;
   updatedAt: string;
   assignee?: ApiUser | null;
+  comment_count: number;
 };
 
 export type ApiComment = {

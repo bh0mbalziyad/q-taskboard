@@ -14,6 +14,7 @@ const baseTask: ApiTask = {
   position: 0,
   createdAt: new Date().toISOString(),
   updatedAt: new Date().toISOString(),
+  comment_count: 0,
   assignee: { id: "u_1", name: "Meera Iyer", email: "meera@taskboard.dev" },
 };
 
@@ -27,6 +28,13 @@ describe("<TaskCard />", () => {
   it("falls back to 'unassigned' when there is no assignee", () => {
     render(<TaskCard task={{ ...baseTask, assignee: null, assigneeId: null }} />);
     expect(screen.getByText("unassigned")).toBeInTheDocument();
+  });
+
+  it("hides the comment count when zero and shows it otherwise", () => {
+    const { rerender } = render(<TaskCard task={baseTask} />);
+    expect(screen.queryByLabelText(/comments$/)).toBeNull();
+    rerender(<TaskCard task={{ ...baseTask, comment_count: 3 }} />);
+    expect(screen.getByLabelText("3 comments")).toBeInTheDocument();
   });
 
   it("invokes onClick with the task when clicked", () => {

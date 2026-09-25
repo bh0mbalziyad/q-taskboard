@@ -35,6 +35,7 @@ export function TaskDetail({ task, projectId, members, onClose }: Props) {
     mutationFn: (body: string) => postComment(task.id, body),
     onSuccess: ({ comment }) => {
       setCommentBody("");
+      queryClient.invalidateQueries({ queryKey: ["project", projectId] });
       queryClient.setQueryData<{ comments: ApiComment[] }>(commentsKey, (old) => ({
         comments: [...(old?.comments ?? []), comment],
       }));

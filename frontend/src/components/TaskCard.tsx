@@ -17,6 +17,11 @@ export function TaskCard({ task, onClick }: Props) {
         <span>
           {task.assignee ? task.assignee.name : "unassigned"}
         </span>
+        {task.comment_count > 0 && (
+          <span aria-label={`${task.comment_count} comments`}>
+            💬 {task.comment_count}
+          </span>
+        )}
       </div>
     </button>
   );
