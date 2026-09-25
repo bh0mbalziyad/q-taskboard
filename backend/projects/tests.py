@@ -97,3 +97,60 @@ class TestTasks:
 
         response = client.delete(f'/api/tasks/{task.id}')
         assert response.status_code == 403
+
+
+@pytest.mark.django_db
+class TestTaskSearch:
+    @pytest.fixture
+    def project(self, user):
+        project = Project.objects.create(name='P', owner=user)
+        Membership.objects.create(user=user, project=project, role='admin')
+        Task.objects.create(project=project, title='Record demo video', description='for launch', created_by=user, position=0)
+        Task.objects.create(project=project, title='Draft press release', description='mention the VIDEO', created_by=user, position=1)
+        Task.objects.create(project=project, title='Book venue', description=None, created_by=user, position=2)
+        return project
+
+    def _titles(self, response):
+        return [t['title'] for t in response.data['tasks']]
+
+    def test_search_matches_title_case_insensitive(self, auth_client, project):
+        response = auth_client.get(f'/api/projects/{project.id}/tasks', {'q': 'DEMO'})
+        assert response.status_code == 200
+        assert self._titles(response) == ['Record demo video']
+
+    def test_search_matches_description(self, auth_client, project):
+        response = auth_client.get(f'/api/projects/{project.id}/tasks', {'q': 'video'})
+        assert self._titles(response) == ['Record demo video', 'Draft press release']
+
+    def test_search_no_match(self, auth_client, project):
+        response = auth_client.get(f'/api/projects/{project.id}/tasks', {'q': 'zzz'})
+        assert response.data['tasks'] == []
+
+    def test_search_scoped_to_project(self, auth_client, user, project):
+        other = Project.objects.create(name='Other', owner=user)
+        Membership.objects.create(user=user, project=other, role='admin')
+        Task.objects.create(project=other, title='Other video', created_by=user)
+        response = auth_client.get(f'/api/projects/{project.id}/tasks', {'q': 'Other'})
+        assert response.data['tasks'] == []
+
+    @pytest.mark.parametrize('payload', [
+        "x' OR 'x%'='x",
+        "x%' OR (SELECT COUNT(*) FROM users)>'0' OR 'x%'='x",
+        "'; DROP TABLE tasks; --",
+    ])
+    def test_search_sql_injection_returns_nothing(self, auth_client, project, payload):
+        response = auth_client.get(f'/api/projects/{project.id}/tasks', {'q': payload})
+        assert response.status_code == 200
+        assert response.data['tasks'] == []
+        assert Task.objects.filter(project=project).count() == 3
+
+    def test_search_uses_serializer_shape(self, auth_client, project):
+        search = auth_client.get(f'/api/projects/{project.id}/tasks', {'q': 'venue'}).data['tasks'][0]
+        listing = [t for t in auth_client.get(f'/api/projects/{project.id}/tasks').data['tasks'] if t['title'] == 'Book venue'][0]
+        assert search == listing
+
+    def test_search_requires_membership(self, client, project):
+        User.objects.create_user(email='stranger@example.com', name='S', password='password123')
+        resp = client.post('/api/auth/login', {'email': 'stranger@example.com', 'password': 'password123'}, format='json')
+        client.credentials(HTTP_AUTHORIZATION=f"Bearer {resp.data['token']}")
+        assert client.get(f'/api/projects/{project.id}/tasks', {'q': 'video'}).status_code == 403
