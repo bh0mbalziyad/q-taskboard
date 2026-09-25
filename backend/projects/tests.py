@@ -259,3 +259,131 @@ class TestComments:
         self._login(client, 'meera@taskboard.dev')
         with django_assert_max_num_queries(6):
             assert client.get(f'/api/tasks/{task.id}/comments').status_code == 200
+
+
+@pytest.mark.django_db
+class TestPostComment:
+    @pytest.fixture
+    def setup(self, user):
+        from projects.models import Comment
+        owner = User.objects.create_user(email='owner@example.com', name='Owner', password='password123')
+        project = Project.objects.create(name='P', owner=owner)
+        Membership.objects.create(user=owner, project=project, role='admin')
+        task = Task.objects.create(project=project, title='T', created_by=owner)
+        return owner, project, task, Comment
+
+    def _login(self, client, email):
+        resp = client.post('/api/auth/login', {'email': email, 'password': 'password123'}, format='json')
+        client.credentials(HTTP_AUTHORIZATION=f"Bearer {resp.data['token']}")
+
+    @pytest.mark.parametrize('role', ['admin', 'member'])
+    def test_editor_posts_and_sees_it_in_thread(self, client, user, setup, role):
+        owner, project, task, Comment = setup
+        Membership.objects.create(user=user, project=project, role=role)
+        self._login(client, 'meera@taskboard.dev')
+
+        response = client.post(f'/api/tasks/{task.id}/comments', {'body': '  hi  '}, format='json')
+        assert response.status_code == 201
+        c = response.data['comment']
+        assert c['body'] == 'hi'
+        assert c['author']['id'] == str(user.id) or c['author']['id'] == user.id
+        assert c['task_id'] == str(task.id)
+        assert c['created_at']
+        thread = client.get(f'/api/tasks/{task.id}/comments').data['comments']
+        assert [x['body'] for x in thread] == ['hi']
+
+    def test_viewer_gets_403_and_nothing_created(self, client, user, setup):
+        owner, project, task, Comment = setup
+        Membership.objects.create(user=user, project=project, role='viewer')
+        self._login(client, 'meera@taskboard.dev')
+        response = client.post(f'/api/tasks/{task.id}/comments', {'body': 'x'}, format='json')
+        assert response.status_code == 403
+        assert Comment.objects.count() == 0
+
+    def test_non_member_gets_403_even_with_invalid_body(self, client, user, setup):
+        owner, project, task, Comment = setup
+        self._login(client, 'meera@taskboard.dev')
+        assert client.post(f'/api/tasks/{task.id}/comments', {'body': 'x'}, format='json').status_code == 403
+        assert client.post(f'/api/tasks/{task.id}/comments', {'body': ''}, format='json').status_code == 403
+        assert Comment.objects.count() == 0
+
+    def test_member_elsewhere_cannot_post(self, client, user, setup):
+        owner, project, task, Comment = setup
+        other = Project.objects.create(name='Other', owner=user)
+        Membership.objects.create(user=user, project=other, role='admin')
+        self._login(client, 'meera@taskboard.dev')
+        assert client.post(f'/api/tasks/{task.id}/comments', {'body': 'x'}, format='json').status_code == 403
+        assert Comment.objects.count() == 0
+
+    def test_unauthenticated_rejected(self, client, setup):
+        owner, project, task, Comment = setup
+        response = client.post(f'/api/tasks/{task.id}/comments', {'body': 'x'}, format='json')
+        assert response.status_code in (401, 403)
+        assert Comment.objects.count() == 0
+
+    def test_unknown_task_404(self, auth_client):
+        import uuid
+        assert auth_client.post(f'/api/tasks/{uuid.uuid4()}/comments', {'body': 'x'}, format='json').status_code == 404
+
+    @pytest.mark.parametrize('body', ['', '   \n\t ', 'a' * 5001, None, 123])
+    def test_invalid_body_400(self, client, user, setup, body):
+        owner, project, task, Comment = setup
+        Membership.objects.create(user=user, project=project, role='member')
+        self._login(client, 'meera@taskboard.dev')
+        response = client.post(f'/api/tasks/{task.id}/comments', {'body': body}, format='json')
+        assert response.status_code == 400
+        assert 'error' in response.data
+        assert Comment.objects.count() == 0
+
+    def test_missing_body_400_and_limit_boundary(self, client, user, setup):
+        owner, project, task, Comment = setup
+        Membership.objects.create(user=user, project=project, role='member')
+        self._login(client, 'meera@taskboard.dev')
+        assert client.post(f'/api/tasks/{task.id}/comments', {}, format='json').status_code == 400
+        assert client.post(f'/api/tasks/{task.id}/comments', {'body': 'a' * 5000}, format='json').status_code == 201
+
+    def test_client_supplied_fields_ignored(self, client, user, setup):
+        import uuid
+        owner, project, task, Comment = setup
+        other_task = Task.objects.create(project=project, title='O', created_by=owner)
+        Membership.objects.create(user=user, project=project, role='member')
+        self._login(client, 'meera@taskboard.dev')
+        response = client.post(f'/api/tasks/{task.id}/comments', {
+            'body': 'x', 'author': str(owner.id), 'author_id': str(owner.id),
+            'task': str(other_task.id), 'task_id': str(other_task.id),
+            'created_at': '2000-01-01T00:00:00Z', 'id': str(uuid.uuid4()),
+        }, format='json')
+        assert response.status_code == 201
+        c = Comment.objects.get()
+        assert c.author_id == user.id
+        assert c.task_id == task.id
+        assert c.created_at.year != 2000
+        assert str(c.id) == response.data['comment']['id']
+        assert Comment.objects.filter(task=other_task).count() == 0
+
+    @pytest.mark.parametrize('method', ['patch', 'put', 'delete'])
+    @pytest.mark.parametrize('role', ['admin', 'member', 'viewer', 'owner'])
+    def test_no_edit_or_delete(self, client, user, setup, method, role):
+        owner, project, task, Comment = setup
+        comment = Comment.objects.create(task=task, author=owner, body='orig')
+        if role == 'owner':
+            self._login(client, 'owner@example.com')
+        else:
+            Membership.objects.create(user=user, project=project, role=role)
+            self._login(client, 'meera@taskboard.dev')
+        for url in (f'/api/tasks/{task.id}/comments', f'/api/tasks/{task.id}/comments/{comment.id}'):
+            response = getattr(client, method)(url, {'body': 'changed'}, format='json')
+            assert response.status_code in (405, 404) if url.endswith(str(comment.id)) else response.status_code == 405
+        comment.refresh_from_db()
+        assert comment.body == 'orig'
+        assert Comment.objects.count() == 1
+
+    def test_role_downgrade_applies_next_request(self, client, user, setup):
+        owner, project, task, Comment = setup
+        m = Membership.objects.create(user=user, project=project, role='member')
+        self._login(client, 'meera@taskboard.dev')
+        assert client.post(f'/api/tasks/{task.id}/comments', {'body': 'a'}, format='json').status_code == 201
+        m.role = 'viewer'
+        m.save()
+        assert client.post(f'/api/tasks/{task.id}/comments', {'body': 'b'}, format='json').status_code == 403
+        assert Comment.objects.count() == 1

@@ -207,6 +207,26 @@ class TaskCommentListView(APIView):
         )
         return Response({'comments': CommentSerializer(comments, many=True).data})
 
+    def post(self, request, task_id):
+        try:
+            task = Task.objects.get(id=task_id)
+        except Task.DoesNotExist:
+            return Response({'error': 'not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        membership = _get_membership(request.user, str(task.project_id))
+        if not membership or not _can_edit_tasks(membership.role):
+            return Response({'error': 'forbidden'}, status=status.HTTP_403_FORBIDDEN)
+
+        body = request.data.get('body') if hasattr(request.data, 'get') else None
+        if not isinstance(body, str):
+            return Response({'error': 'invalid input'}, status=status.HTTP_400_BAD_REQUEST)
+        body = body.strip()
+        if not body or len(body) > 5000:
+            return Response({'error': 'invalid input'}, status=status.HTTP_400_BAD_REQUEST)
+
+        comment = Comment.objects.create(task=task, author=request.user, body=body)
+        return Response({'comment': CommentSerializer(comment).data}, status=status.HTTP_201_CREATED)
+
 
 class MemberAddView(APIView):
     def post(self, request, project_id):
