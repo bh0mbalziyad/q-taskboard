@@ -154,3 +154,108 @@ class TestTaskSearch:
         resp = client.post('/api/auth/login', {'email': 'stranger@example.com', 'password': 'password123'}, format='json')
         client.credentials(HTTP_AUTHORIZATION=f"Bearer {resp.data['token']}")
         assert client.get(f'/api/projects/{project.id}/tasks', {'q': 'video'}).status_code == 403
+
+
+@pytest.mark.django_db
+class TestComments:
+    @pytest.fixture
+    def setup(self, user):
+        from projects.models import Comment
+        owner = User.objects.create_user(email='owner@example.com', name='Owner', password='password123')
+        project = Project.objects.create(name='P', owner=owner)
+        Membership.objects.create(user=owner, project=project, role='admin')
+        task = Task.objects.create(project=project, title='T', created_by=owner)
+        return owner, project, task, Comment
+
+    def _login(self, client, email):
+        resp = client.post('/api/auth/login', {'email': email, 'password': 'password123'}, format='json')
+        client.credentials(HTTP_AUTHORIZATION=f"Bearer {resp.data['token']}")
+
+    @pytest.mark.parametrize('role', ['admin', 'member', 'viewer'])
+    def test_any_member_reads_thread_with_author_and_time(self, client, user, setup, role):
+        owner, project, task, Comment = setup
+        Membership.objects.create(user=user, project=project, role=role)
+        Comment.objects.create(task=task, author=owner, body='hello')
+        self._login(client, 'meera@taskboard.dev')
+
+        response = client.get(f'/api/tasks/{task.id}/comments')
+        assert response.status_code == 200
+        c = response.data['comments'][0]
+        assert c['body'] == 'hello'
+        assert c['author']['name'] == 'Owner'
+        assert c['created_at']
+        assert c['task_id'] == str(task.id)
+
+    def test_oldest_first_with_stable_tiebreak(self, client, user, setup):
+        from django.utils import timezone
+        from datetime import timedelta
+        owner, project, task, Comment = setup
+        Membership.objects.create(user=user, project=project, role='viewer')
+        now = timezone.now()
+        late = Comment.objects.create(task=task, author=owner, body='late')
+        first = Comment.objects.create(task=task, author=owner, body='first')
+        tie_a = Comment.objects.create(task=task, author=owner, body='tie-a')
+        tie_b = Comment.objects.create(task=task, author=owner, body='tie-b')
+        Comment.objects.filter(id=late.id).update(created_at=now)
+        Comment.objects.filter(id=first.id).update(created_at=now - timedelta(days=1))
+        Comment.objects.filter(id__in=[tie_a.id, tie_b.id]).update(created_at=now - timedelta(hours=1))
+        expected = ['first'] + [c.body for c in sorted([tie_a, tie_b], key=lambda c: c.id)] + ['late']
+        self._login(client, 'meera@taskboard.dev')
+
+        response = client.get(f'/api/tasks/{task.id}/comments')
+        assert [c['body'] for c in response.data['comments']] == expected
+
+    def test_non_member_gets_403_without_data(self, client, user, setup):
+        owner, project, task, Comment = setup
+        Comment.objects.create(task=task, author=owner, body='secret')
+        self._login(client, 'meera@taskboard.dev')
+
+        response = client.get(f'/api/tasks/{task.id}/comments')
+        assert response.status_code == 403
+        assert 'comments' not in response.data
+        assert 'secret' not in str(response.data)
+
+    def test_member_of_other_project_cannot_read(self, client, user, setup):
+        owner, project, task, Comment = setup
+        other = Project.objects.create(name='Other', owner=user)
+        Membership.objects.create(user=user, project=other, role='admin')
+        Comment.objects.create(task=task, author=owner, body='secret')
+        self._login(client, 'meera@taskboard.dev')
+
+        assert client.get(f'/api/tasks/{task.id}/comments').status_code == 403
+
+    def test_unauthenticated_rejected(self, client, setup):
+        owner, project, task, Comment = setup
+        assert client.get(f'/api/tasks/{task.id}/comments').status_code in (401, 403)
+
+    def test_unknown_task_404(self, auth_client):
+        import uuid
+        assert auth_client.get(f'/api/tasks/{uuid.uuid4()}/comments').status_code == 404
+
+    def test_deleting_task_deletes_thread(self, setup):
+        owner, project, task, Comment = setup
+        Comment.objects.create(task=task, author=owner, body='x')
+        task.delete()
+        assert Comment.objects.count() == 0
+
+    def test_deleting_author_keeps_comments(self, client, user, setup):
+        owner, project, task, Comment = setup
+        author = User.objects.create_user(email='gone@example.com', name='Gone', password='password123')
+        Comment.objects.create(task=task, author=author, body='stays')
+        Membership.objects.create(user=user, project=project, role='viewer')
+        author.delete()
+        self._login(client, 'meera@taskboard.dev')
+
+        response = client.get(f'/api/tasks/{task.id}/comments')
+        assert response.status_code == 200
+        assert response.data['comments'][0]['body'] == 'stays'
+        assert response.data['comments'][0]['author'] is None
+
+    def test_authors_loaded_without_per_comment_queries(self, client, user, setup, django_assert_max_num_queries):
+        owner, project, task, Comment = setup
+        Membership.objects.create(user=user, project=project, role='viewer')
+        for i in range(5):
+            Comment.objects.create(task=task, author=owner, body=str(i))
+        self._login(client, 'meera@taskboard.dev')
+        with django_assert_max_num_queries(6):
+            assert client.get(f'/api/tasks/{task.id}/comments').status_code == 200

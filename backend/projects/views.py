@@ -3,8 +3,8 @@ from rest_framework.response import Response
 from rest_framework import status
 from django.db.models import Q
 from users.serializers import UserSerializer
-from .models import Project, Membership, Task
-from .serializers import ProjectDetailSerializer, TaskSerializer
+from .models import Project, Membership, Task, Comment
+from .serializers import ProjectDetailSerializer, TaskSerializer, CommentSerializer
 
 
 def _get_membership(user, project_id):
@@ -186,6 +186,26 @@ class TaskDetailView(APIView):
 
         task.delete()
         return Response({'ok': True})
+
+
+class TaskCommentListView(APIView):
+    def get(self, request, task_id):
+        try:
+            task = Task.objects.get(id=task_id)
+        except Task.DoesNotExist:
+            return Response({'error': 'not found'}, status=status.HTTP_404_NOT_FOUND)
+
+        membership = _get_membership(request.user, str(task.project_id))
+        if not membership:
+            return Response({'error': 'forbidden'}, status=status.HTTP_403_FORBIDDEN)
+
+        comments = (
+            Comment.objects
+            .filter(task=task)
+            .select_related('author')
+            .order_by('created_at', 'id')
+        )
+        return Response({'comments': CommentSerializer(comments, many=True).data})
 
 
 class MemberAddView(APIView):
