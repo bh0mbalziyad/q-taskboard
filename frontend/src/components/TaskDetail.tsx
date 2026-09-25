@@ -1,7 +1,7 @@
 import { useState } from "react";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
-import { apiFetch } from "@/lib/api-client";
-import type { ApiTask, ApiProjectMember, TaskStatus } from "@/types";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { apiFetch, fetchComments, getStoredUser, postComment } from "@/lib/api-client";
+import type { ApiComment, ApiTask, ApiProjectMember, TaskStatus } from "@/types";
 import { STATUS_LABELS, STATUS_ORDER } from "@/types";
 
 type Props = {
@@ -18,6 +18,34 @@ export function TaskDetail({ task, projectId, members, onClose }: Props) {
   const [status, setStatus] = useState<TaskStatus>(task.status);
   const [assigneeId, setAssigneeId] = useState<string>(task.assigneeId ?? "");
   const [error, setError] = useState<string | null>(null);
+  const [commentBody, setCommentBody] = useState("");
+  const [commentError, setCommentError] = useState<string | null>(null);
+
+  const myId = getStoredUser()?.id;
+  const myRole = members.find((m) => m.user.id === myId)?.role;
+  const canComment = myRole === "admin" || myRole === "member";
+
+  const commentsKey = ["comments", task.id];
+  const comments = useQuery({
+    queryKey: commentsKey,
+    queryFn: () => fetchComments(task.id),
+  });
+
+  const addComment = useMutation({
+    mutationFn: (body: string) => postComment(task.id, body),
+    onSuccess: ({ comment }) => {
+      setCommentBody("");
+      queryClient.setQueryData<{ comments: ApiComment[] }>(commentsKey, (old) => ({
+        comments: [...(old?.comments ?? []), comment],
+      }));
+    },
+    onError: (err) => setCommentError(err instanceof Error ? err.message : "comment failed"),
+  });
+
+  function onComment() {
+    setCommentError(null);
+    addComment.mutate(commentBody);
+  }
 
   const updateTask = useMutation({
     mutationFn: (input: Partial<ApiTask>) =>
@@ -120,6 +148,54 @@ export function TaskDetail({ task, projectId, members, onClose }: Props) {
             </select>
           </label>
         </div>
+
+        <section className="mb-4 border-t border-border pt-3">
+          <h3 className="text-xs text-muted mb-2">comments</h3>
+          {comments.isLoading && <p className="text-sm text-muted">loading…</p>}
+          {comments.error && (
+            <p className="text-sm text-red-400" role="alert">
+              {comments.error instanceof Error ? comments.error.message : "failed to load comments"}
+            </p>
+          )}
+          {comments.data && comments.data.comments.length === 0 && (
+            <p className="text-sm text-muted">no comments yet</p>
+          )}
+          <ul className="space-y-2 max-h-48 overflow-y-auto">
+            {comments.data?.comments.map((c) => (
+              <li key={c.id} className="text-sm">
+                <div className="text-xs text-muted">
+                  {c.author?.name ?? "unknown user"} ·{" "}
+                  {new Date(c.created_at).toLocaleString()}
+                </div>
+                <p className="whitespace-pre-wrap">{c.body}</p>
+              </li>
+            ))}
+          </ul>
+          {canComment && (
+            <div className="mt-3">
+              <textarea
+                value={commentBody}
+                onChange={(e) => setCommentBody(e.target.value)}
+                rows={2}
+                placeholder="add a comment"
+                aria-label="add a comment"
+                className="block w-full rounded-md bg-bg border border-border px-3 py-2 text-sm focus:border-accent focus:outline-none"
+              />
+              {commentError && (
+                <p className="text-sm text-red-400 mt-2" role="alert">
+                  {commentError}
+                </p>
+              )}
+              <button
+                onClick={onComment}
+                disabled={addComment.isPending || !commentBody.trim()}
+                className="mt-2 text-sm px-4 py-2 rounded-md bg-accent text-white hover:bg-indigo-500 disabled:opacity-50"
+              >
+                {addComment.isPending ? "posting…" : "post comment"}
+              </button>
+            </div>
+          )}
+        </section>
 
         {error && (
           <p className="text-sm text-red-400 mb-3" role="alert">

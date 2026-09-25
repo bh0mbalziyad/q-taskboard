@@ -1,3 +1,5 @@
+import type { ApiComment } from "@/types";
+
 const TOKEN_KEY = "taskboard_token";
 const USER_KEY = "taskboard_user";
 
@@ -44,4 +46,15 @@ export async function apiFetch<T>(path: string, options: RequestInit = {}): Prom
     throw new Error(message);
   }
   return data as T;
+}
+
+export function fetchComments(taskId: string): Promise<{ comments: ApiComment[] }> {
+  return apiFetch<{ comments: ApiComment[] }>(`/api/tasks/${taskId}/comments`);
+}
+
+export function postComment(taskId: string, body: string): Promise<{ comment: ApiComment }> {
+  return apiFetch<{ comment: ApiComment }>(`/api/tasks/${taskId}/comments`, {
+    method: "POST",
+    body: JSON.stringify({ body }),
+  });
 }
